@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; overflow:hidden; cursor:none; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const DPR = window.devicePixelRatio || 1;
+let W = window.innerWidth, H = window.innerHeight;
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W*DPR; canvas.height = H*DPR;
+  canvas.style.width = W+'px'; canvas.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Palette ───────────────────────────────────────────────
+const COLORS = [
+  'rgba(255,255,255,',
+  'rgba(80,180,255,',
+  'rgba(0,255,200,',
+  'rgba(255,80,200,',
+  'rgba(180,80,255,',
+  'rgba(255,220,0,',
+  'rgba(255,100,80,',
+  'rgba(0,255,120,',
+];
+function rndCol(a) {
+  return COLORS[Math.floor(Math.random()*COLORS.length)] + a + ')';
+}
+
+// ── Ambient floating ring ─────────────────────────────────
+class Ring {
+  constructor(initial) {
+    this.x  = Math.random() * W;
+    this.y  = initial ? Math.random() * H : H + 60;
+    this.vx = (Math.random()-0.5) * 0.3;
+    this.vy = -(0.1 + Math.random() * 0.35);
+    this.r  = 8 + Math.random() * 30;
+    this.w  = 0.4 + Math.random() * 1.0;
+    this.col = rndCol(0.4 + Math.random()*0.5);
+    this.alpha = 0;
+    this.maxAlpha = 0.12 + Math.random() * 0.45;
+    this.phase = Math.random() * Math.PI * 2;
+    this.rot = Math.random() * Math.PI * 2;
+    this.rotSpd = (Math.random()-0.5) * 0.004;
+    this.age = 0;
+    this.lifespan = 320 + Math.random() * 420;
+    this.fadeIn = 60 + Math.random() * 80;
+
+    // Wobbly control points — N points around the ring with individual phase/amp
+    this.pts = 6 + Math.floor(Math.random() * 5);
+    this.offsets = [];
+    for (let i=0; i<this.pts; i++) {
+      this.offsets.push({
+        amp:   this.r * (0.004 + Math.random() * 0.012),
+        phase: Math.random() * Math.PI * 2,
+        spd:   0.0008 + Math.random() * 0.0018,
+      });
+    }
+  }
+
+  update() {
+    this.age++;
+    this.x += this.vx + Math.sin(this.age*0.01+this.phase)*0.18;
+    this.y += this.vy;
+    this.rot += this.rotSpd;
+    if (this.age < this.fadeIn) this.alpha = (this.age/this.fadeIn)*this.maxAlpha;
+    else if (this.age > this.lifespan-60) this.alpha = Math.max(0, this.alpha - this.maxAlpha/60);
+    else this.alpha = this.maxAlpha;
+  }
+
+  draw(ts) {
+    if (this.alpha < 0.004) return;
+
+    // Sample dense points around ring with smooth wobble (sum of sine waves)
+    const SAMPLES = 80;
+    const points = [];
+    for (let i=0; i<SAMPLES; i++) {
+      const angle = (i / SAMPLES) * Math.PI * 2;
+      // Accumulate wobble from each offset — smooth organic deformation
+      let wobble = 0;
+      for (let j=0; j<this.offsets.length; j++) {
+        const o = this.offsets[j];
+        wobble += o.amp * Math.sin(angle * (j+1) + ts * o.spd + o.phase);
+      }
+      const r = this.r + wobble;
+      points.push({ x: Math.cos(angle)*r, y: Math.sin(angle)*r });
+    }
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rot);
+    ctx.globalAlpha = this.alpha;
+    ctx.strokeStyle = this.col;
+    ctx.lineWidth = this.w;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    // Draw using midpoint smoothing — perfectly smooth at any point count
+    ctx.beginPath();
+    ctx.moveTo(
+      (points[0].x + points[SAMPLES-1].x)*0.5,
+      (points[0].y + points[SAMPLES-1].y)*0.5
+    );
+    for (let i=0; i<SAMPLES; i++) {
+      const curr = points[i];
+      const next = points[(i+1) % SAMPLES];
+      const mx = (curr.x + next.x) * 0.5;
+      const my = (curr.y + next.y) * 0.5;
+      ctx.quadraticCurveTo(curr.x, curr.y, mx, my);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  isDead() { return this.age > this.lifespan || this.y < -80; }
+}
+
+// ── Web strand — shoots out from touch point ──────────────
+class Strand {
+  constructor(ox, oy, angle, spd, len, col, w) {
+    this.ox = ox; this.oy = oy;       // origin
+    this.angle = angle;
+    this.spd = spd;
+    this.maxLen = len;
+    this.col = col;
+    this.w = w;
+
+    // Current tip position
+    this.tx = ox; this.ty = oy;
+    this.progress = 0; // 0→1 shoot out
+
+    // After reaching maxLen, strand hangs with physics
+    this.nodes = null;
+    this.shot = false;
+
+    this.life = 1.0;
+    this.decay = 0.004 + Math.random()*0.006;
+
+    // Slight curve offset
+    this.curve = (Math.random()-0.5) * 0.6;
+  }
+
+  update() {
+    if (!this.shot) {
+      // Shooting phase
+      this.progress += this.spd / this.maxLen;
+      if (this.progress >= 1) {
+        this.progress = 1;
+        this.shot = true;
+        // Init physics nodes along the strand
+        const n = 8;
+        this.nodes = [];
+        for (let i=0; i<=n; i++) {
+          const t = i/n;
+          const cx = this.ox + Math.cos(this.angle) * this.maxLen * t
+                   + Math.sin(this.angle) * this.curve * this.maxLen * t * (1-t) * 4;
+          const cy = this.oy + Math.sin(this.angle) * this.maxLen * t
+                   - Math.cos(this.angle) * this.curve * this.maxLen * t * (1-t) * 4;
+          this.nodes.push({ x: cx, y: cy, vx:0, vy:0 });
+        }
+      }
+      const t = this.progress;
+      this.tx = this.ox + Math.cos(this.angle)*this.maxLen*t
+              + Math.sin(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+      this.ty = this.oy + Math.sin(this.angle)*this.maxLen*t
+              - Math.cos(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+    } else {
+      // Physics hang phase — tip falls with gravity
+      if (this.nodes) {
+        for (let i=1; i<this.nodes.length; i++) {
+          const n = this.nodes[i];
+          n.vy += 0.08;
+          n.vx *= 0.97; n.vy *= 0.97;
+          n.x += n.vx; n.y += n.vy;
+        }
+      }
+    }
+    this.life -= this.decay;
+  }
+
+  draw() {
+    if (this.life <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = this.life * this.life;
+    ctx.strokeStyle = this.col;
+    ctx.lineWidth = this.w * this.life;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (!this.shot) {
+      // Draw line from origin to current tip
+      ctx.beginPath();
+      ctx.moveTo(this.ox, this.oy);
+      ctx.lineTo(this.tx, this.ty);
+      ctx.stroke();
+    } else if (this.nodes) {
+      // Draw curved path through nodes
+      ctx.beginPath();
+      ctx.moveTo(this.nodes[0].x, this.nodes[0].y);
+      for (let i=1; i<this.nodes.length-1; i++) {
+        const mx = (this.nodes[i].x + this.nodes[i+1].x)*0.5;
+        const my = (this.nodes[i].y + this.nodes[i+1].y)*0.5;
+        ctx.quadraticCurveTo(this.nodes[i].x, this.nodes[i].y, mx, my);
+      }
+      ctx.lineTo(this.nodes[this.nodes.length-1].x, this.nodes[this.nodes.length-1].y);
+      ctx.stroke();
+
+      // Tiny dot at tip
+      const tip = this.nodes[this.nodes.length-1];
+      ctx.fillStyle = this.col;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, this.w*1.5, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  isDead() { return this.life <= 0; }
+}
+
+// ── Shockwave ─────────────────────────────────────────────
+class Shockwave {
+  constructor(x, y) {
+    this.x=x; this.y=y; this.r=0; this.life=1.0;
+    this.maxR = 100 + Math.random()*60;
+  }
+  update() { this.r += (this.maxR-this.r)*0.14; this.life -= 0.055; }
+  draw() {
+    if (this.life<=0) return;
+    ctx.save();
+    ctx.globalAlpha = this.life*0.25;
+    ctx.strokeStyle = 'rgba(255,255,255,1)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  isDead() { return this.life<=0; }
+}
+
+// ── Touch handler ─────────────────────────────────────────
+function onTouch(x, y) {
+  // Shockwave
+  waves.push(new Shockwave(x, y));
+
+  // Fire strands in all directions — spider-man style
+  const count = 28 + Math.floor(Math.random()*20);
+  for (let i=0; i<count; i++) {
+    const angle = (i/count)*Math.PI*2 + (Math.random()-0.5)*0.3;
+    const spd   = 8 + Math.random()*16;
+    const len   = 80 + Math.random()*Math.min(W, H)*0.5;
+    const col   = rndCol(0.7 + Math.random()*0.3);
+    const w     = 0.5 + Math.random()*1.8;
+    strands.push(new Strand(x, y, angle, spd, len, col, w));
+  }
+
+  // Extra thick anchor strands
+  const anchors = 6 + Math.floor(Math.random()*4);
+  for (let i=0; i<anchors; i++) {
+    const angle = (i/anchors)*Math.PI*2;
+    const len   = Math.min(W,H)*0.4 + Math.random()*Math.min(W,H)*0.3;
+    strands.push(new Strand(x, y, angle, 20, len, 'rgba(255,255,255,0.9)', 1.5 + Math.random()));
+  }
+}
+
+canvas.addEventListener('mousedown', e => onTouch(e.clientX, e.clientY));
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onTouch(t.clientX, t.clientY);
+}, { passive:false });
+
+// ── Stars ─────────────────────────────────────────────────
+const stars = [];
+for (let i=0; i<180; i++) stars.push({
+  x:Math.random()*W, y:Math.random()*H,
+  r:0.3+Math.random()*1.1,
+  a:0.08+Math.random()*0.4,
+  phase:Math.random()*Math.PI*2
+});
+
+function drawStars(ts) {
+  for (const s of stars) {
+    ctx.save();
+    ctx.globalAlpha = s.a*(0.5+0.5*Math.sin(ts*0.001+s.phase));
+    ctx.fillStyle='#fff';
+    ctx.beginPath();
+    ctx.arc(s.x,s.y,s.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── State ─────────────────────────────────────────────────
+let rings   = [];
+let strands = [];
+let waves   = [];
+
+for (let i=0; i<110; i++) rings.push(new Ring(true));
+
+// ── BG ────────────────────────────────────────────────────
+function drawBG() {
+  const g = ctx.createRadialGradient(W*0.5,H*0.4,0,W*0.5,H*0.5,Math.max(W,H)*0.8);
+  g.addColorStop(0,'#04040e');
+  g.addColorStop(0.5,'#020208');
+  g.addColorStop(1,'#000000');
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,W,H);
+}
+function drawVignette() {
+  const vg=ctx.createRadialGradient(W*0.5,H*0.5,H*0.1,W*0.5,H*0.5,H*0.9);
+  vg.addColorStop(0,'rgba(0,0,0,0)');
+  vg.addColorStop(1,'rgba(0,0,0,0.92)');
+  ctx.fillStyle=vg;
+  ctx.fillRect(0,0,W,H);
+}
+
+// ── Render ────────────────────────────────────────────────
+function render(ts) {
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  drawBG();
+  drawStars(ts);
+
+  for (let i=rings.length-1; i>=0; i--) {
+    rings[i].update(); rings[i].draw(ts);
+    if (rings[i].isDead()) rings[i] = new Ring(false);
+  }
+
+  for (let i=waves.length-1; i>=0; i--) {
+    waves[i].update(); waves[i].draw();
+    if (waves[i].isDead()) waves.splice(i,1);
+  }
+
+  for (let i=strands.length-1; i>=0; i--) {
+    strands[i].update(); strands[i].draw();
+    if (strands[i].isDead()) strands.splice(i,1);
+  }
+
+  drawVignette();
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
