@@ -26,6 +26,34 @@ function resize() {
 resize();
 window.addEventListener('resize', resize);
 
+// ── Microphone ───────────────────────────────────────────
+let micLevel = 0;
+let micReady = false;
+
+async function initMic() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const ac  = new AudioContext();
+    const src = ac.createMediaStreamSource(stream);
+    const an  = ac.createAnalyser();
+    an.fftSize = 256;
+    src.connect(an);
+    const buf = new Uint8Array(an.frequencyBinCount);
+    micReady = true;
+    function tick() {
+      an.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i=0; i<buf.length; i++) { const v=(buf[i]-128)/128; sum+=v*v; }
+      const raw = Math.sqrt(sum/buf.length);
+      micLevel += (raw*5.0 - micLevel) * 0.2;
+      micLevel = Math.min(Math.max(micLevel,0),1);
+      requestAnimationFrame(tick);
+    }
+    tick();
+  } catch(e) { console.warn('Mic not available', e); }
+}
+initMic();
+
 // ── Palette ───────────────────────────────────────────────
 const COLORS = [
   'rgba(255,255,255,',
@@ -47,7 +75,8 @@ class Ring {
     this.x  = Math.random() * W;
     this.y  = initial ? Math.random() * H : H + 60;
     this.vx = (Math.random()-0.5) * 0.3;
-    this.vy = -(0.1 + Math.random() * 0.35);
+    this.vy = -(0.3 + Math.random() * 0.7);
+    this.bvx = 0; this.bvy = 0;
     this.r  = 8 + Math.random() * 30;
     this.w  = 0.4 + Math.random() * 1.0;
     this.col = rndCol(0.4 + Math.random()*0.5);
@@ -74,9 +103,12 @@ class Ring {
 
   update() {
     this.age++;
-    this.x += this.vx + Math.sin(this.age*0.01+this.phase)*0.18;
-    this.y += this.vy;
-    this.rot += this.rotSpd;
+    // Mic shake — voice makes rings wobble
+    const shake = micReady ? micLevel * 8.0 : 0;
+    this.bvx *= 0.75; this.bvy *= 0.75;
+    this.x += this.vx + Math.sin(this.age*0.01+this.phase)*0.18 + (Math.random()-0.5)*shake + this.bvx;
+    this.y += this.vy + (Math.random()-0.5)*shake*0.5 + this.bvy;
+    this.rot += this.rotSpd + micLevel*0.05;
     if (this.age < this.fadeIn) this.alpha = (this.age/this.fadeIn)*this.maxAlpha;
     else if (this.age > this.lifespan-60) this.alpha = Math.max(0, this.alpha - this.maxAlpha/60);
     else this.alpha = this.maxAlpha;
@@ -127,6 +159,15 @@ class Ring {
     ctx.restore();
   }
 
+  blast(tx, ty) {
+    const dx = this.x - tx, dy = this.y - ty;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if (d < 250) {
+      const f = (1 - d/250) * 0.8;
+      this.bvx += (dx/d) * f;
+      this.bvy += (dy/d) * f;
+    }
+  }
   isDead() { return this.age > this.lifespan || this.y < -80; }
 }
 
@@ -256,7 +297,9 @@ class Shockwave {
 
 // ── Touch handler ─────────────────────────────────────────
 function onTouch(x, y) {
-  // Shockwave
+  bgBrightness = Math.min(1, bgBrightness + 0.18);
+  // Blast nearby rings away
+  for (const r of rings) r.blast(x, y);
   waves.push(new Shockwave(x, y));
 
   // Fire strands in all directions — spider-man style
@@ -279,10 +322,49 @@ function onTouch(x, y) {
   }
 }
 
-canvas.addEventListener('mousedown', e => onTouch(e.clientX, e.clientY));
+canvas.addEventListener('mousedown', e => {
+  onTouch(e.clientX, e.clientY);
+  const t = new Trail();
+  t.addPoint(e.clientX, e.clientY);
+  activeTrails['mouse'] = t;
+  trails.push(t);
+});
+canvas.addEventListener('mousemove', e => {
+  if (e.buttons > 0 && activeTrails['mouse']) {
+    activeTrails['mouse'].addPoint(e.clientX, e.clientY);
+    for (const r of rings) r.blast(e.clientX, e.clientY);
+  }
+});
+canvas.addEventListener('mouseup', e => {
+  if (activeTrails['mouse']) { activeTrails['mouse'].finish(); delete activeTrails['mouse']; }
+});
+
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
-  for (const t of e.changedTouches) onTouch(t.clientX, t.clientY);
+  for (const t of e.changedTouches) {
+    onTouch(t.clientX, t.clientY);
+    const trail = new Trail();
+    trail.addPoint(t.clientX, t.clientY);
+    activeTrails[t.identifier] = trail;
+    trails.push(trail);
+  }
+}, { passive:false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (activeTrails[t.identifier]) {
+      activeTrails[t.identifier].addPoint(t.clientX, t.clientY);
+      for (const r of rings) r.blast(t.clientX, t.clientY);
+    }
+  }
+}, { passive:false });
+canvas.addEventListener('touchend', e => {
+  for (const t of e.changedTouches) {
+    if (activeTrails[t.identifier]) {
+      activeTrails[t.identifier].finish();
+      delete activeTrails[t.identifier];
+    }
+  }
 }, { passive:false });
 
 // ── Stars ─────────────────────────────────────────────────
@@ -306,19 +388,64 @@ function drawStars(ts) {
   }
 }
 
+// ── Brush Trail ──────────────────────────────────────────
+class Trail {
+  constructor() {
+    this.points = [];
+    this.life = 1.0;
+    this.decay = 0.006 + Math.random()*0.003;
+    this.col = 'rgba(255,255,255,1)';
+    this.w = 7 + Math.random()*4;
+    this.active = true;
+  }
+  addPoint(x, y) {
+    this.points.push({ x, y });
+    if (this.points.length > 80) this.points.shift();
+  }
+  finish() { this.active = false; }
+  update() {
+    if (!this.active) this.life -= this.decay;
+  }
+  draw() {
+    if (this.points.length < 2 || this.life <= 0) return;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let i=1; i<this.points.length; i++) {
+      const t = i / this.points.length;
+      const a = this.life * this.life * t * 0.85;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = this.col;
+      ctx.lineWidth = this.w * t;
+      ctx.beginPath();
+      ctx.moveTo(this.points[i-1].x, this.points[i-1].y);
+      ctx.lineTo(this.points[i].x, this.points[i].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  isDead() { return !this.active && this.life <= 0; }
+}
+
 // ── State ─────────────────────────────────────────────────
 let rings   = [];
 let strands = [];
 let waves   = [];
+let trails  = [];
+let activeTrails = {}; // key: touch identifier
+let bgBrightness = 0;
 
-for (let i=0; i<110; i++) rings.push(new Ring(true));
+for (let i=0; i<180; i++) rings.push(new Ring(true));
 
 // ── BG ────────────────────────────────────────────────────
 function drawBG() {
+  // Fade brightness back down over time
+  bgBrightness = Math.max(0, bgBrightness - 0.008);
+  const b = Math.floor(bgBrightness * 60);
   const g = ctx.createRadialGradient(W*0.5,H*0.4,0,W*0.5,H*0.5,Math.max(W,H)*0.8);
-  g.addColorStop(0,'#04040e');
-  g.addColorStop(0.5,'#020208');
-  g.addColorStop(1,'#000000');
+  g.addColorStop(0, `rgb(${4+b},${4+b},${4+b})`);
+  g.addColorStop(0.5, `rgb(${2+b/2},${2+b/2},${2+b/2})`);
+  g.addColorStop(1, `rgb(0,0,0)`);
   ctx.fillStyle=g;
   ctx.fillRect(0,0,W,H);
 }
@@ -339,6 +466,11 @@ function render(ts) {
   for (let i=rings.length-1; i>=0; i--) {
     rings[i].update(); rings[i].draw(ts);
     if (rings[i].isDead()) rings[i] = new Ring(false);
+  }
+
+  for (let i=trails.length-1; i>=0; i--) {
+    trails[i].update(); trails[i].draw();
+    if (trails[i].isDead()) trails.splice(i,1);
   }
 
   for (let i=waves.length-1; i>=0; i--) {
