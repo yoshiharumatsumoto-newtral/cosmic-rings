@@ -159,11 +159,11 @@ class Ring {
     ctx.restore();
   }
 
-  blast(tx, ty) {
+  blast(tx, ty, force=12) {
     const dx = this.x - tx, dy = this.y - ty;
     const d = Math.sqrt(dx*dx + dy*dy);
     if (d < 250) {
-      const f = (1 - d/250) * 0.8;
+      const f = (1 - d/250) * force;
       this.bvx += (dx/d) * f;
       this.bvy += (dy/d) * f;
     }
@@ -332,7 +332,7 @@ canvas.addEventListener('mousedown', e => {
 canvas.addEventListener('mousemove', e => {
   if (e.buttons > 0 && activeTrails['mouse']) {
     activeTrails['mouse'].addPoint(e.clientX, e.clientY);
-    for (const r of rings) r.blast(e.clientX, e.clientY);
+    for (const r of rings) r.blast(e.clientX, e.clientY, 0.8);
   }
 });
 canvas.addEventListener('mouseup', e => {
@@ -354,7 +354,7 @@ canvas.addEventListener('touchmove', e => {
   for (const t of e.changedTouches) {
     if (activeTrails[t.identifier]) {
       activeTrails[t.identifier].addPoint(t.clientX, t.clientY);
-      for (const r of rings) r.blast(t.clientX, t.clientY);
+      for (const r of rings) r.blast(t.clientX, t.clientY, 0.8);
     }
   }
 }, { passive:false });
