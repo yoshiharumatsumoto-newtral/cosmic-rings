@@ -67,6 +67,133 @@ async function initMic() {
 }
 initMic();
 
+// ── Audio ────────────────────────────────────────────────
+let ac = null, masterGain = null;
+
+function getAC() {
+  if (!ac) {
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = ac.createGain();
+    masterGain.gain.value = 0.9;
+    masterGain.connect(ac.destination);
+  }
+  return ac;
+}
+
+// ── Kick drum ─────────────────────────────────────────────
+// Y軸: 上=高めのキック、下=重いサブキック
+function playKick(y) {
+  const a = getAC(); a.resume();
+  const now = a.currentTime;
+
+  // Y軸で開始ピッチをマッピング（上=180hz、下=50hz）
+  const t = y / H; // 0=top, 1=bottom
+  const startFreq = 180 - t * 130; // 180→50hz
+  const endFreq   = 28  - t * 8;   // 28→20hz
+
+  // メインサイン波（ボディ）
+  const osc = a.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(startFreq, now);
+  osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.45);
+
+  // サブ倍音（より太く）
+  const osc2 = a.createOscillator();
+  osc2.type = 'sine';
+  osc2.frequency.setValueAtTime(startFreq * 0.5, now);
+  osc2.frequency.exponentialRampToValueAtTime(endFreq * 0.5, now + 0.45);
+  const sub2Gain = a.createGain();
+  sub2Gain.gain.value = 0.5;
+
+  // パンチ感のためのクリック（短いノイズバースト）
+  const bufLen = a.sampleRate * 0.03;
+  const clickBuf = a.createBuffer(1, bufLen, a.sampleRate);
+  const data = clickBuf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) data[i] = (Math.random()*2-1) * (1 - i/bufLen);
+  const click = a.createBufferSource();
+  click.buffer = clickBuf;
+  const clickFilter = a.createBiquadFilter();
+  clickFilter.type = 'bandpass';
+  clickFilter.frequency.value = 200;
+  clickFilter.Q.value = 0.8;
+  const clickGain = a.createGain();
+  clickGain.gain.value = 0.6;
+
+  // アンプエンベロープ
+  const env = a.createGain();
+  env.gain.setValueAtTime(0.001, now);
+  env.gain.exponentialRampToValueAtTime(0.99, now + 0.003); // 超速アタック
+  env.gain.exponentialRampToValueAtTime(0.3,  now + 0.08);
+  env.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+
+  // 軽いディストーション（CLUBっぽさ）
+  const dist = a.createWaveShaper();
+  const curve = new Float32Array(512);
+  for (let i=0;i<512;i++){const x=(i*2)/512-1;curve[i]=x*(1+0.8)/(1+0.8*Math.abs(x));}
+  dist.curve = curve;
+
+  osc.connect(env);
+  osc2.connect(sub2Gain); sub2Gain.connect(env);
+  click.connect(clickFilter); clickFilter.connect(clickGain); clickGain.connect(env);
+  env.connect(dist); dist.connect(masterGain);
+
+  osc.start(now); osc.stop(now + 0.55);
+  osc2.start(now); osc2.stop(now + 0.55);
+  click.start(now); click.stop(now + 0.04);
+}
+
+// ── Snare drum ────────────────────────────────────────────
+// Y軸: 上=高くパチっと、下=低くスナッピー
+function playSnare(y) {
+  const a = getAC(); a.resume();
+  const now = a.currentTime;
+
+  const t = y / H; // 0=top, 1=bottom
+  // Y軸でノイズフィルターの明るさを変える（上=明るいスナップ、下=暗いスナップ）
+  const noiseFreq = 2800 - t * 2000; // 2800→800hz
+  const toneFreq  = 280  - t * 180;  // 280→100hz
+
+  // ノイズ成分（スネアの質感）
+  const bufLen = a.sampleRate * 0.25;
+  const noiseBuf = a.createBuffer(1, bufLen, a.sampleRate);
+  const data = noiseBuf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) data[i] = Math.random()*2-1;
+  const noise = a.createBufferSource();
+  noise.buffer = noiseBuf;
+
+  const noiseFilter = a.createBiquadFilter();
+  noiseFilter.type = 'bandpass';
+  noiseFilter.frequency.value = noiseFreq;
+  noiseFilter.Q.value = 0.8;
+
+  const noiseEnv = a.createGain();
+  noiseEnv.gain.setValueAtTime(0.001, now);
+  noiseEnv.gain.exponentialRampToValueAtTime(0.7, now + 0.002);
+  noiseEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+  // トーン成分（スネアのボディ）
+  const tone = a.createOscillator();
+  tone.type = 'triangle';
+  tone.frequency.setValueAtTime(toneFreq, now);
+  tone.frequency.exponentialRampToValueAtTime(toneFreq * 0.5, now + 0.1);
+
+  const toneEnv = a.createGain();
+  toneEnv.gain.setValueAtTime(0.001, now);
+  toneEnv.gain.exponentialRampToValueAtTime(0.5, now + 0.002);
+  toneEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+  // ミックス
+  const mix = a.createGain();
+  mix.gain.value = 0.85;
+
+  noise.connect(noiseFilter); noiseFilter.connect(noiseEnv); noiseEnv.connect(mix);
+  tone.connect(toneEnv); toneEnv.connect(mix);
+  mix.connect(masterGain);
+
+  noise.start(now); noise.stop(now + 0.3);
+  tone.start(now); tone.stop(now + 0.2);
+}
+
 // ── Palette ───────────────────────────────────────────────
 const COLORS = [
   'rgba(255,255,255,',
@@ -101,8 +228,6 @@ class Ring {
     this.age = 0;
     this.lifespan = 320 + Math.random() * 420;
     this.fadeIn = 60 + Math.random() * 80;
-
-    // Wobbly control points — N points around the ring with individual phase/amp
     this.pts = 6 + Math.floor(Math.random() * 5);
     this.offsets = [];
     for (let i=0; i<this.pts; i++) {
@@ -113,10 +238,8 @@ class Ring {
       });
     }
   }
-
   update() {
     this.age++;
-    // Mic shake — voice makes rings wobble
     const shake = micReady ? micLevel * 8.0 : 0;
     this.bvx *= 0.75; this.bvy *= 0.75;
     this.x += this.vx + Math.sin(this.age*0.01+this.phase)*0.18 + (Math.random()-0.5)*shake + this.bvx;
@@ -126,16 +249,12 @@ class Ring {
     else if (this.age > this.lifespan-60) this.alpha = Math.max(0, this.alpha - this.maxAlpha/60);
     else this.alpha = this.maxAlpha;
   }
-
   draw(ts) {
     if (this.alpha < 0.004) return;
-
-    // Sample dense points around ring with smooth wobble (sum of sine waves)
     const SAMPLES = 80;
     const points = [];
     for (let i=0; i<SAMPLES; i++) {
       const angle = (i / SAMPLES) * Math.PI * 2;
-      // Accumulate wobble from each offset — smooth organic deformation
       let wobble = 0;
       for (let j=0; j<this.offsets.length; j++) {
         const o = this.offsets[j];
@@ -144,7 +263,6 @@ class Ring {
       const r = this.r + wobble;
       points.push({ x: Math.cos(angle)*r, y: Math.sin(angle)*r });
     }
-
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.rot);
@@ -153,13 +271,8 @@ class Ring {
     ctx.lineWidth = this.w;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-
-    // Draw using midpoint smoothing — perfectly smooth at any point count
     ctx.beginPath();
-    ctx.moveTo(
-      (points[0].x + points[SAMPLES-1].x)*0.5,
-      (points[0].y + points[SAMPLES-1].y)*0.5
-    );
+    ctx.moveTo((points[0].x + points[SAMPLES-1].x)*0.5, (points[0].y + points[SAMPLES-1].y)*0.5);
     for (let i=0; i<SAMPLES; i++) {
       const curr = points[i];
       const next = points[(i+1) % SAMPLES];
@@ -171,7 +284,6 @@ class Ring {
     ctx.stroke();
     ctx.restore();
   }
-
   blast(tx, ty, force=12) {
     const dx = this.x - tx, dy = this.y - ty;
     const d = Math.sqrt(dx*dx + dy*dy);
@@ -184,39 +296,29 @@ class Ring {
   isDead() { return this.age > this.lifespan || this.y < -80; }
 }
 
-// ── Web strand — shoots out from touch point ──────────────
+// ── Strand ────────────────────────────────────────────────
 class Strand {
   constructor(ox, oy, angle, spd, len, col, w) {
-    this.ox = ox; this.oy = oy;       // origin
+    this.ox = ox; this.oy = oy;
     this.angle = angle;
     this.spd = spd;
     this.maxLen = len;
     this.col = col;
     this.w = w;
-
-    // Current tip position
     this.tx = ox; this.ty = oy;
-    this.progress = 0; // 0→1 shoot out
-
-    // After reaching maxLen, strand hangs with physics
+    this.progress = 0;
     this.nodes = null;
     this.shot = false;
-
     this.life = 1.0;
     this.decay = 0.004 + Math.random()*0.006;
-
-    // Slight curve offset
     this.curve = (Math.random()-0.5) * 0.6;
   }
-
   update() {
     if (!this.shot) {
-      // Shooting phase
       this.progress += this.spd / this.maxLen;
       if (this.progress >= 1) {
         this.progress = 1;
         this.shot = true;
-        // Init physics nodes along the strand
         const n = 8;
         this.nodes = [];
         for (let i=0; i<=n; i++) {
@@ -234,7 +336,6 @@ class Strand {
       this.ty = this.oy + Math.sin(this.angle)*this.maxLen*t
               - Math.cos(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
     } else {
-      // Physics hang phase — tip falls with gravity
       if (this.nodes) {
         for (let i=1; i<this.nodes.length; i++) {
           const n = this.nodes[i];
@@ -246,7 +347,6 @@ class Strand {
     }
     this.life -= this.decay;
   }
-
   draw() {
     if (this.life <= 0) return;
     ctx.save();
@@ -255,15 +355,12 @@ class Strand {
     ctx.lineWidth = this.w * this.life;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-
     if (!this.shot) {
-      // Draw line from origin to current tip
       ctx.beginPath();
       ctx.moveTo(this.ox, this.oy);
       ctx.lineTo(this.tx, this.ty);
       ctx.stroke();
     } else if (this.nodes) {
-      // Draw curved path through nodes
       ctx.beginPath();
       ctx.moveTo(this.nodes[0].x, this.nodes[0].y);
       for (let i=1; i<this.nodes.length-1; i++) {
@@ -273,8 +370,6 @@ class Strand {
       }
       ctx.lineTo(this.nodes[this.nodes.length-1].x, this.nodes[this.nodes.length-1].y);
       ctx.stroke();
-
-      // Tiny dot at tip
       const tip = this.nodes[this.nodes.length-1];
       ctx.fillStyle = this.col;
       ctx.beginPath();
@@ -283,7 +378,6 @@ class Strand {
     }
     ctx.restore();
   }
-
   isDead() { return this.life <= 0; }
 }
 
@@ -310,12 +404,17 @@ class Shockwave {
 
 // ── Touch handler ─────────────────────────────────────────
 function onTouch(x, y) {
+  // 左半分=キック、右半分=スネア
+  if (x < W * 0.5) {
+    playKick(y);
+  } else {
+    playSnare(y);
+  }
+
   bgBrightness = Math.min(1, bgBrightness + 0.18);
-  // Blast nearby rings away
   for (const r of rings) r.blast(x, y);
   waves.push(new Shockwave(x, y));
 
-  // Fire strands in all directions — spider-man style
   const count = 28 + Math.floor(Math.random()*20);
   for (let i=0; i<count; i++) {
     const angle = (i/count)*Math.PI*2 + (Math.random()-0.5)*0.3;
@@ -326,7 +425,6 @@ function onTouch(x, y) {
     strands.push(new Strand(x, y, angle, spd, len, col, w));
   }
 
-  // Extra thick anchor strands
   const anchors = 6 + Math.floor(Math.random()*4);
   for (let i=0; i<anchors; i++) {
     const angle = (i/anchors)*Math.PI*2;
@@ -388,7 +486,6 @@ for (let i=0; i<180; i++) stars.push({
   a:0.08+Math.random()*0.4,
   phase:Math.random()*Math.PI*2
 });
-
 function drawStars(ts) {
   for (const s of stars) {
     ctx.save();
@@ -401,7 +498,7 @@ function drawStars(ts) {
   }
 }
 
-// ── Brush Trail ──────────────────────────────────────────
+// ── Trail ─────────────────────────────────────────────────
 class Trail {
   constructor() {
     this.points = [];
@@ -416,9 +513,7 @@ class Trail {
     if (this.points.length > 80) this.points.shift();
   }
   finish() { this.active = false; }
-  update() {
-    if (!this.active) this.life -= this.decay;
-  }
+  update() { if (!this.active) this.life -= this.decay; }
   draw() {
     if (this.points.length < 2 || this.life <= 0) return;
     ctx.save();
@@ -445,14 +540,13 @@ let rings   = [];
 let strands = [];
 let waves   = [];
 let trails  = [];
-let activeTrails = {}; // key: touch identifier
+let activeTrails = {};
 let bgBrightness = 0;
 
 for (let i=0; i<180; i++) rings.push(new Ring(true));
 
 // ── BG ────────────────────────────────────────────────────
 function drawBG() {
-  // Fade brightness back down over time
   bgBrightness = Math.max(0, bgBrightness - 0.008);
   const b = Math.floor(bgBrightness * 60);
   const g = ctx.createRadialGradient(W*0.5,H*0.4,0,W*0.5,H*0.5,Math.max(W,H)*0.8);
@@ -480,17 +574,14 @@ function render(ts) {
     rings[i].update(); rings[i].draw(ts);
     if (rings[i].isDead()) rings[i] = new Ring(false);
   }
-
   for (let i=trails.length-1; i>=0; i--) {
     trails[i].update(); trails[i].draw();
     if (trails[i].isDead()) trails.splice(i,1);
   }
-
   for (let i=waves.length-1; i>=0; i--) {
     waves[i].update(); waves[i].draw();
     if (waves[i].isDead()) waves.splice(i,1);
   }
-
   for (let i=strands.length-1; i>=0; i--) {
     strands[i].update(); strands[i].draw();
     if (strands[i].isDead()) strands.splice(i,1);
