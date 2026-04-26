@@ -42,555 +42,433 @@ window.addEventListener('resize', resize);
 // ── Microphone ───────────────────────────────────────────
 let micLevel = 0;
 let micReady = false;
-
 async function initMic() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const ac  = new AudioContext();
-    const src = ac.createMediaStreamSource(stream);
-    const an  = ac.createAnalyser();
-    an.fftSize = 256;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+    const ac2 = new AudioContext();
+    const src = ac2.createMediaStreamSource(stream);
+    const an  = ac2.createAnalyser(); an.fftSize = 256;
     src.connect(an);
     const buf = new Uint8Array(an.frequencyBinCount);
     micReady = true;
     function tick() {
       an.getByteTimeDomainData(buf);
       let sum = 0;
-      for (let i=0; i<buf.length; i++) { const v=(buf[i]-128)/128; sum+=v*v; }
+      for (let i=0;i<buf.length;i++){const v=(buf[i]-128)/128;sum+=v*v;}
       const raw = Math.sqrt(sum/buf.length);
-      micLevel += (raw*5.0 - micLevel) * 0.2;
+      micLevel += (raw*5.0 - micLevel)*0.2;
       micLevel = Math.min(Math.max(micLevel,0),1);
       requestAnimationFrame(tick);
     }
     tick();
-  } catch(e) { console.warn('Mic not available', e); }
+  } catch(e) { console.warn('Mic not available',e); }
 }
 initMic();
 
 // ── Audio ────────────────────────────────────────────────
 let ac = null, masterGain = null;
-
 function getAC() {
   if (!ac) {
     ac = new (window.AudioContext || window.webkitAudioContext)();
     masterGain = ac.createGain();
-    masterGain.gain.value = 0.9;
+    masterGain.gain.value = 1.0;
     masterGain.connect(ac.destination);
   }
   return ac;
 }
 
-// ── Kick drum ─────────────────────────────────────────────
-// Y軸: 上=高めのキック、下=重いサブキック
+// ── 808 Kick ─────────────────────────────────────────────
+// Y軸: 上=高め(80hz→30hz)、下=超低め(55hz→20hz)
 function playKick(y) {
   const a = getAC(); a.resume();
   const now = a.currentTime;
+  const t = y / H;
 
-  // Y軸で開始ピッチをマッピング（上=180hz、下=50hz）
-  const t = y / H; // 0=top, 1=bottom
-  const startFreq = 180 - t * 130; // 180→50hz
-  const endFreq   = 28  - t * 8;   // 28→20hz
+  // Y軸でピッチマッピング
+  const startFreq = 80  - t * 25;  // 80→55hz
+  const endFreq   = 30  - t * 10;  // 30→20hz
+  const decay     = 0.6 + t * 0.4; // 下ほど長く伸びる
 
-  // メインサイン波（ボディ）
+  // ── サブサイン（808の核心）
   const osc = a.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(startFreq, now);
-  osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.45);
+  // 急激なピッチ降下 — ここがクラブっぽさの鍵
+  osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.035);
 
-  // サブ倍音（より太く）
-  const osc2 = a.createOscillator();
-  osc2.type = 'sine';
-  osc2.frequency.setValueAtTime(startFreq * 0.5, now);
-  osc2.frequency.exponentialRampToValueAtTime(endFreq * 0.5, now + 0.45);
-  const sub2Gain = a.createGain();
-  sub2Gain.gain.value = 0.5;
+  // ── サブのアンプエンベロープ — 長くずっしり
+  const oscEnv = a.createGain();
+  oscEnv.gain.setValueAtTime(0.001, now);
+  oscEnv.gain.exponentialRampToValueAtTime(1.0, now + 0.002); // 瞬間アタック
+  oscEnv.gain.exponentialRampToValueAtTime(0.001, now + decay);
 
-  // パンチ感のためのクリック（短いノイズバースト）
-  const bufLen = a.sampleRate * 0.03;
-  const clickBuf = a.createBuffer(1, bufLen, a.sampleRate);
-  const data = clickBuf.getChannelData(0);
-  for (let i = 0; i < bufLen; i++) data[i] = (Math.random()*2-1) * (1 - i/bufLen);
-  const click = a.createBufferSource();
-  click.buffer = clickBuf;
-  const clickFilter = a.createBiquadFilter();
-  clickFilter.type = 'bandpass';
-  clickFilter.frequency.value = 200;
-  clickFilter.Q.value = 0.8;
-  const clickGain = a.createGain();
-  clickGain.gain.value = 0.6;
+  // ── トランジェント（最初の1〜2msの硬い打撃感）
+  const clickOsc = a.createOscillator();
+  clickOsc.type = 'sine';
+  clickOsc.frequency.value = 160;
+  const clickEnv = a.createGain();
+  clickEnv.gain.setValueAtTime(0.001, now);
+  clickEnv.gain.exponentialRampToValueAtTime(0.6, now + 0.001);
+  clickEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
 
-  // アンプエンベロープ
-  const env = a.createGain();
-  env.gain.setValueAtTime(0.001, now);
-  env.gain.exponentialRampToValueAtTime(0.99, now + 0.003); // 超速アタック
-  env.gain.exponentialRampToValueAtTime(0.3,  now + 0.08);
-  env.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
-
-  // 軽いディストーション（CLUBっぽさ）
-  const dist = a.createWaveShaper();
+  // ── サチュレーション（808の歪み感）
+  const sat = a.createWaveShaper();
   const curve = new Float32Array(512);
-  for (let i=0;i<512;i++){const x=(i*2)/512-1;curve[i]=x*(1+0.8)/(1+0.8*Math.abs(x));}
-  dist.curve = curve;
+  for (let i=0;i<512;i++) {
+    const x = (i*2)/512 - 1;
+    // ソフトクリップ — 低域を潰してパンチを出す
+    curve[i] = (Math.PI + 220) * x / (Math.PI + 220 * Math.abs(x));
+  }
+  sat.curve = curve;
 
-  osc.connect(env);
-  osc2.connect(sub2Gain); sub2Gain.connect(env);
-  click.connect(clickFilter); clickFilter.connect(clickGain); clickGain.connect(env);
-  env.connect(dist); dist.connect(masterGain);
+  // ── ローパス（余分な高域をカット）
+  const lp = a.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 120;
+  lp.Q.value = 0.5;
 
-  osc.start(now); osc.stop(now + 0.55);
-  osc2.start(now); osc2.stop(now + 0.55);
-  click.start(now); click.stop(now + 0.04);
+  // ── 最終ゲイン
+  const out = a.createGain();
+  out.gain.value = 1.2;
+
+  osc.connect(oscEnv);
+  clickOsc.connect(clickEnv);
+  oscEnv.connect(sat); clickEnv.connect(sat);
+  sat.connect(lp); lp.connect(out); out.connect(masterGain);
+
+  osc.start(now); osc.stop(now + decay + 0.1);
+  clickOsc.start(now); clickOsc.stop(now + 0.025);
 }
 
-// ── Snare drum ────────────────────────────────────────────
-// Y軸: 上=高くパチっと、下=低くスナッピー
+// ── 808 Snare / Clap ──────────────────────────────────────
+// Y軸: 上=タイトなリムショット、下=808スラップスネア
 function playSnare(y) {
   const a = getAC(); a.resume();
   const now = a.currentTime;
+  const t = y / H;
 
-  const t = y / H; // 0=top, 1=bottom
-  // Y軸でノイズフィルターの明るさを変える（上=明るいスナップ、下=暗いスナップ）
-  const noiseFreq = 2800 - t * 2000; // 2800→800hz
-  const toneFreq  = 280  - t * 180;  // 280→100hz
+  // Y軸でキャラクター変化
+  const noiseDecay  = 0.08 + t * 0.06;  // 上=タイト、下=少し長め
+  const noiseFreq   = 3200 - t * 1800;  // 上=明るい、下=暗い
+  const toneFreq    = 320  - t * 160;   // 上=高い、下=低い
+  const toneDecay   = 0.06 + t * 0.04;
 
-  // ノイズ成分（スネアの質感）
-  const bufLen = a.sampleRate * 0.25;
+  // ── ノイズ層（スネアの質感）
+  const bufLen = Math.floor(a.sampleRate * 0.3);
   const noiseBuf = a.createBuffer(1, bufLen, a.sampleRate);
   const data = noiseBuf.getChannelData(0);
-  for (let i = 0; i < bufLen; i++) data[i] = Math.random()*2-1;
+  for (let i=0;i<bufLen;i++) data[i] = Math.random()*2-1;
   const noise = a.createBufferSource();
   noise.buffer = noiseBuf;
 
-  const noiseFilter = a.createBiquadFilter();
-  noiseFilter.type = 'bandpass';
-  noiseFilter.frequency.value = noiseFreq;
-  noiseFilter.Q.value = 0.8;
+  // ハイパスでロー成分をカット → タイトな質感
+  const hp = a.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 800;
+  hp.Q.value = 0.5;
+
+  const bp = a.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = noiseFreq;
+  bp.Q.value = 1.2;
 
   const noiseEnv = a.createGain();
   noiseEnv.gain.setValueAtTime(0.001, now);
-  noiseEnv.gain.exponentialRampToValueAtTime(0.7, now + 0.002);
-  noiseEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+  noiseEnv.gain.exponentialRampToValueAtTime(0.9, now + 0.001);
+  noiseEnv.gain.exponentialRampToValueAtTime(0.001, now + noiseDecay);
 
-  // トーン成分（スネアのボディ）
+  // ── トーン層（ボディ）
   const tone = a.createOscillator();
   tone.type = 'triangle';
   tone.frequency.setValueAtTime(toneFreq, now);
-  tone.frequency.exponentialRampToValueAtTime(toneFreq * 0.5, now + 0.1);
+  tone.frequency.exponentialRampToValueAtTime(toneFreq * 0.6, now + toneDecay);
 
   const toneEnv = a.createGain();
   toneEnv.gain.setValueAtTime(0.001, now);
-  toneEnv.gain.exponentialRampToValueAtTime(0.5, now + 0.002);
-  toneEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+  toneEnv.gain.exponentialRampToValueAtTime(0.7, now + 0.001);
+  toneEnv.gain.exponentialRampToValueAtTime(0.001, now + toneDecay);
 
-  // ミックス
-  const mix = a.createGain();
-  mix.gain.value = 0.85;
+  // ── サチュレーション（パンチを出す）
+  const sat = a.createWaveShaper();
+  const curve = new Float32Array(512);
+  for (let i=0;i<512;i++) {
+    const x = (i*2)/512-1;
+    curve[i] = x*(1+1.5)/(1+1.5*Math.abs(x));
+  }
+  sat.curve = curve;
 
-  noise.connect(noiseFilter); noiseFilter.connect(noiseEnv); noiseEnv.connect(mix);
-  tone.connect(toneEnv); toneEnv.connect(mix);
-  mix.connect(masterGain);
+  const out = a.createGain();
+  out.gain.value = 1.1;
 
-  noise.start(now); noise.stop(now + 0.3);
-  tone.start(now); tone.stop(now + 0.2);
+  noise.connect(hp); hp.connect(bp); bp.connect(noiseEnv);
+  tone.connect(toneEnv);
+  noiseEnv.connect(sat); toneEnv.connect(sat);
+  sat.connect(out); out.connect(masterGain);
+
+  noise.start(now); noise.stop(now + noiseDecay + 0.05);
+  tone.start(now); tone.stop(now + toneDecay + 0.05);
 }
 
 // ── Palette ───────────────────────────────────────────────
 const COLORS = [
-  'rgba(255,255,255,',
-  'rgba(80,180,255,',
-  'rgba(0,255,200,',
-  'rgba(255,80,200,',
-  'rgba(180,80,255,',
-  'rgba(255,220,0,',
-  'rgba(255,100,80,',
-  'rgba(0,255,120,',
+  'rgba(255,255,255,','rgba(80,180,255,','rgba(0,255,200,',
+  'rgba(255,80,200,','rgba(180,80,255,','rgba(255,220,0,',
+  'rgba(255,100,80,','rgba(0,255,120,',
 ];
-function rndCol(a) {
-  return COLORS[Math.floor(Math.random()*COLORS.length)] + a + ')';
-}
+function rndCol(a) { return COLORS[Math.floor(Math.random()*COLORS.length)]+a+')'; }
 
-// ── Ambient floating ring ─────────────────────────────────
+// ── Ring ──────────────────────────────────────────────────
 class Ring {
   constructor(initial) {
-    this.x  = Math.random() * W;
-    this.y  = initial ? Math.random() * H : H + 60;
-    this.vx = (Math.random()-0.5) * 0.3;
-    this.vy = -(0.3 + Math.random() * 0.7);
+    this.x = Math.random()*W;
+    this.y = initial ? Math.random()*H : H+60;
+    this.vx = (Math.random()-0.5)*0.3;
+    this.vy = -(0.3+Math.random()*0.7);
     this.bvx = 0; this.bvy = 0;
-    this.r  = 8 + Math.random() * 30;
-    this.w  = 0.4 + Math.random() * 1.0;
-    this.col = rndCol(0.4 + Math.random()*0.5);
+    this.r = 8+Math.random()*30;
+    this.w = 0.4+Math.random()*1.0;
+    this.col = rndCol(0.4+Math.random()*0.5);
     this.alpha = 0;
-    this.maxAlpha = 0.12 + Math.random() * 0.45;
-    this.phase = Math.random() * Math.PI * 2;
-    this.rot = Math.random() * Math.PI * 2;
-    this.rotSpd = (Math.random()-0.5) * 0.004;
+    this.maxAlpha = 0.12+Math.random()*0.45;
+    this.phase = Math.random()*Math.PI*2;
+    this.rot = Math.random()*Math.PI*2;
+    this.rotSpd = (Math.random()-0.5)*0.004;
     this.age = 0;
-    this.lifespan = 320 + Math.random() * 420;
-    this.fadeIn = 60 + Math.random() * 80;
-    this.pts = 6 + Math.floor(Math.random() * 5);
+    this.lifespan = 320+Math.random()*420;
+    this.fadeIn = 60+Math.random()*80;
+    this.pts = 6+Math.floor(Math.random()*5);
     this.offsets = [];
-    for (let i=0; i<this.pts; i++) {
-      this.offsets.push({
-        amp:   this.r * (0.004 + Math.random() * 0.012),
-        phase: Math.random() * Math.PI * 2,
-        spd:   0.0008 + Math.random() * 0.0018,
-      });
+    for (let i=0;i<this.pts;i++) {
+      this.offsets.push({amp:this.r*(0.004+Math.random()*0.012),phase:Math.random()*Math.PI*2,spd:0.0008+Math.random()*0.0018});
     }
   }
   update() {
     this.age++;
-    const shake = micReady ? micLevel * 8.0 : 0;
+    const shake = micReady ? micLevel*8.0 : 0;
     this.bvx *= 0.75; this.bvy *= 0.75;
-    this.x += this.vx + Math.sin(this.age*0.01+this.phase)*0.18 + (Math.random()-0.5)*shake + this.bvx;
-    this.y += this.vy + (Math.random()-0.5)*shake*0.5 + this.bvy;
-    this.rot += this.rotSpd + micLevel*0.05;
-    if (this.age < this.fadeIn) this.alpha = (this.age/this.fadeIn)*this.maxAlpha;
-    else if (this.age > this.lifespan-60) this.alpha = Math.max(0, this.alpha - this.maxAlpha/60);
-    else this.alpha = this.maxAlpha;
+    this.x += this.vx+Math.sin(this.age*0.01+this.phase)*0.18+(Math.random()-0.5)*shake+this.bvx;
+    this.y += this.vy+(Math.random()-0.5)*shake*0.5+this.bvy;
+    this.rot += this.rotSpd+micLevel*0.05;
+    if (this.age<this.fadeIn) this.alpha=(this.age/this.fadeIn)*this.maxAlpha;
+    else if (this.age>this.lifespan-60) this.alpha=Math.max(0,this.alpha-this.maxAlpha/60);
+    else this.alpha=this.maxAlpha;
   }
   draw(ts) {
-    if (this.alpha < 0.004) return;
-    const SAMPLES = 80;
-    const points = [];
-    for (let i=0; i<SAMPLES; i++) {
-      const angle = (i / SAMPLES) * Math.PI * 2;
-      let wobble = 0;
-      for (let j=0; j<this.offsets.length; j++) {
-        const o = this.offsets[j];
-        wobble += o.amp * Math.sin(angle * (j+1) + ts * o.spd + o.phase);
+    if (this.alpha<0.004) return;
+    const SAMPLES=80, points=[];
+    for (let i=0;i<SAMPLES;i++) {
+      const angle=(i/SAMPLES)*Math.PI*2;
+      let wobble=0;
+      for (let j=0;j<this.offsets.length;j++) {
+        const o=this.offsets[j];
+        wobble+=o.amp*Math.sin(angle*(j+1)+ts*o.spd+o.phase);
       }
-      const r = this.r + wobble;
-      points.push({ x: Math.cos(angle)*r, y: Math.sin(angle)*r });
+      points.push({x:Math.cos(angle)*(this.r+wobble),y:Math.sin(angle)*(this.r+wobble)});
     }
     ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.rot);
-    ctx.globalAlpha = this.alpha;
-    ctx.strokeStyle = this.col;
-    ctx.lineWidth = this.w;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
+    ctx.translate(this.x,this.y); ctx.rotate(this.rot);
+    ctx.globalAlpha=this.alpha; ctx.strokeStyle=this.col;
+    ctx.lineWidth=this.w; ctx.lineCap='round'; ctx.lineJoin='round';
     ctx.beginPath();
-    ctx.moveTo((points[0].x + points[SAMPLES-1].x)*0.5, (points[0].y + points[SAMPLES-1].y)*0.5);
-    for (let i=0; i<SAMPLES; i++) {
-      const curr = points[i];
-      const next = points[(i+1) % SAMPLES];
-      const mx = (curr.x + next.x) * 0.5;
-      const my = (curr.y + next.y) * 0.5;
-      ctx.quadraticCurveTo(curr.x, curr.y, mx, my);
+    ctx.moveTo((points[0].x+points[SAMPLES-1].x)*0.5,(points[0].y+points[SAMPLES-1].y)*0.5);
+    for (let i=0;i<SAMPLES;i++) {
+      const c=points[i],n=points[(i+1)%SAMPLES];
+      ctx.quadraticCurveTo(c.x,c.y,(c.x+n.x)*0.5,(c.y+n.y)*0.5);
     }
-    ctx.closePath();
-    ctx.stroke();
-    ctx.restore();
+    ctx.closePath(); ctx.stroke(); ctx.restore();
   }
-  blast(tx, ty, force=12) {
-    const dx = this.x - tx, dy = this.y - ty;
-    const d = Math.sqrt(dx*dx + dy*dy);
-    if (d < 250) {
-      const f = (1 - d/250) * force;
-      this.bvx += (dx/d) * f;
-      this.bvy += (dy/d) * f;
-    }
+  blast(tx,ty,force=12) {
+    const dx=this.x-tx,dy=this.y-ty,d=Math.sqrt(dx*dx+dy*dy);
+    if (d<250){const f=(1-d/250)*force;this.bvx+=(dx/d)*f;this.bvy+=(dy/d)*f;}
   }
-  isDead() { return this.age > this.lifespan || this.y < -80; }
+  isDead() { return this.age>this.lifespan||this.y<-80; }
 }
 
 // ── Strand ────────────────────────────────────────────────
 class Strand {
-  constructor(ox, oy, angle, spd, len, col, w) {
-    this.ox = ox; this.oy = oy;
-    this.angle = angle;
-    this.spd = spd;
-    this.maxLen = len;
-    this.col = col;
-    this.w = w;
-    this.tx = ox; this.ty = oy;
-    this.progress = 0;
-    this.nodes = null;
-    this.shot = false;
-    this.life = 1.0;
-    this.decay = 0.004 + Math.random()*0.006;
-    this.curve = (Math.random()-0.5) * 0.6;
+  constructor(ox,oy,angle,spd,len,col,w) {
+    this.ox=ox;this.oy=oy;this.angle=angle;this.spd=spd;this.maxLen=len;
+    this.col=col;this.w=w;this.tx=ox;this.ty=oy;this.progress=0;
+    this.nodes=null;this.shot=false;this.life=1.0;
+    this.decay=0.004+Math.random()*0.006;this.curve=(Math.random()-0.5)*0.6;
   }
   update() {
     if (!this.shot) {
-      this.progress += this.spd / this.maxLen;
-      if (this.progress >= 1) {
-        this.progress = 1;
-        this.shot = true;
-        const n = 8;
-        this.nodes = [];
-        for (let i=0; i<=n; i++) {
-          const t = i/n;
-          const cx = this.ox + Math.cos(this.angle) * this.maxLen * t
-                   + Math.sin(this.angle) * this.curve * this.maxLen * t * (1-t) * 4;
-          const cy = this.oy + Math.sin(this.angle) * this.maxLen * t
-                   - Math.cos(this.angle) * this.curve * this.maxLen * t * (1-t) * 4;
-          this.nodes.push({ x: cx, y: cy, vx:0, vy:0 });
+      this.progress+=this.spd/this.maxLen;
+      if (this.progress>=1) {
+        this.progress=1;this.shot=true;
+        const n=8;this.nodes=[];
+        for (let i=0;i<=n;i++) {
+          const t=i/n;
+          const cx=this.ox+Math.cos(this.angle)*this.maxLen*t+Math.sin(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+          const cy=this.oy+Math.sin(this.angle)*this.maxLen*t-Math.cos(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+          this.nodes.push({x:cx,y:cy,vx:0,vy:0});
         }
       }
-      const t = this.progress;
-      this.tx = this.ox + Math.cos(this.angle)*this.maxLen*t
-              + Math.sin(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
-      this.ty = this.oy + Math.sin(this.angle)*this.maxLen*t
-              - Math.cos(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+      const t=this.progress;
+      this.tx=this.ox+Math.cos(this.angle)*this.maxLen*t+Math.sin(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
+      this.ty=this.oy+Math.sin(this.angle)*this.maxLen*t-Math.cos(this.angle)*this.curve*this.maxLen*t*(1-t)*4;
     } else {
-      if (this.nodes) {
-        for (let i=1; i<this.nodes.length; i++) {
-          const n = this.nodes[i];
-          n.vy += 0.08;
-          n.vx *= 0.97; n.vy *= 0.97;
-          n.x += n.vx; n.y += n.vy;
-        }
+      if (this.nodes) for (let i=1;i<this.nodes.length;i++) {
+        const n=this.nodes[i];n.vy+=0.08;n.vx*=0.97;n.vy*=0.97;n.x+=n.vx;n.y+=n.vy;
       }
     }
-    this.life -= this.decay;
+    this.life-=this.decay;
   }
-  draw() {
-    if (this.life <= 0) return;
-    ctx.save();
-    ctx.globalAlpha = this.life * this.life;
-    ctx.strokeStyle = this.col;
-    ctx.lineWidth = this.w * this.life;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    if (!this.shot) {
-      ctx.beginPath();
-      ctx.moveTo(this.ox, this.oy);
-      ctx.lineTo(this.tx, this.ty);
-      ctx.stroke();
-    } else if (this.nodes) {
-      ctx.beginPath();
-      ctx.moveTo(this.nodes[0].x, this.nodes[0].y);
-      for (let i=1; i<this.nodes.length-1; i++) {
-        const mx = (this.nodes[i].x + this.nodes[i+1].x)*0.5;
-        const my = (this.nodes[i].y + this.nodes[i+1].y)*0.5;
-        ctx.quadraticCurveTo(this.nodes[i].x, this.nodes[i].y, mx, my);
-      }
-      ctx.lineTo(this.nodes[this.nodes.length-1].x, this.nodes[this.nodes.length-1].y);
-      ctx.stroke();
-      const tip = this.nodes[this.nodes.length-1];
-      ctx.fillStyle = this.col;
-      ctx.beginPath();
-      ctx.arc(tip.x, tip.y, this.w*1.5, 0, Math.PI*2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-  isDead() { return this.life <= 0; }
-}
-
-// ── Shockwave ─────────────────────────────────────────────
-class Shockwave {
-  constructor(x, y) {
-    this.x=x; this.y=y; this.r=0; this.life=1.0;
-    this.maxR = 100 + Math.random()*60;
-  }
-  update() { this.r += (this.maxR-this.r)*0.14; this.life -= 0.055; }
   draw() {
     if (this.life<=0) return;
-    ctx.save();
-    ctx.globalAlpha = this.life*0.25;
-    ctx.strokeStyle = 'rgba(255,255,255,1)';
-    ctx.lineWidth = 0.8;
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
-    ctx.stroke();
+    ctx.save();ctx.globalAlpha=this.life*this.life;ctx.strokeStyle=this.col;
+    ctx.lineWidth=this.w*this.life;ctx.lineCap='round';ctx.lineJoin='round';
+    if (!this.shot) {
+      ctx.beginPath();ctx.moveTo(this.ox,this.oy);ctx.lineTo(this.tx,this.ty);ctx.stroke();
+    } else if (this.nodes) {
+      ctx.beginPath();ctx.moveTo(this.nodes[0].x,this.nodes[0].y);
+      for (let i=1;i<this.nodes.length-1;i++) {
+        const mx=(this.nodes[i].x+this.nodes[i+1].x)*0.5;
+        const my=(this.nodes[i].y+this.nodes[i+1].y)*0.5;
+        ctx.quadraticCurveTo(this.nodes[i].x,this.nodes[i].y,mx,my);
+      }
+      ctx.lineTo(this.nodes[this.nodes.length-1].x,this.nodes[this.nodes.length-1].y);ctx.stroke();
+      const tip=this.nodes[this.nodes.length-1];
+      ctx.fillStyle=this.col;ctx.beginPath();ctx.arc(tip.x,tip.y,this.w*1.5,0,Math.PI*2);ctx.fill();
+    }
     ctx.restore();
   }
   isDead() { return this.life<=0; }
 }
 
-// ── Touch handler ─────────────────────────────────────────
+// ── Shockwave ─────────────────────────────────────────────
+class Shockwave {
+  constructor(x,y){this.x=x;this.y=y;this.r=0;this.life=1.0;this.maxR=100+Math.random()*60;}
+  update(){this.r+=(this.maxR-this.r)*0.14;this.life-=0.055;}
+  draw(){
+    if(this.life<=0)return;
+    ctx.save();ctx.globalAlpha=this.life*0.25;ctx.strokeStyle='rgba(255,255,255,1)';
+    ctx.lineWidth=0.8;ctx.beginPath();ctx.arc(this.x,this.y,this.r,0,Math.PI*2);ctx.stroke();ctx.restore();
+  }
+  isDead(){return this.life<=0;}
+}
+
+// ── Touch ─────────────────────────────────────────────────
 function onTouch(x, y) {
-  // 左半分=キック、右半分=スネア
   if (x < W * 0.5) {
     playKick(y);
   } else {
     playSnare(y);
   }
 
-  bgBrightness = Math.min(1, bgBrightness + 0.18);
-  for (const r of rings) r.blast(x, y);
-  waves.push(new Shockwave(x, y));
+  bgBrightness = Math.min(1, bgBrightness+0.18);
+  for (const r of rings) r.blast(x,y);
+  waves.push(new Shockwave(x,y));
 
-  const count = 28 + Math.floor(Math.random()*20);
-  for (let i=0; i<count; i++) {
-    const angle = (i/count)*Math.PI*2 + (Math.random()-0.5)*0.3;
-    const spd   = 8 + Math.random()*16;
-    const len   = 80 + Math.random()*Math.min(W, H)*0.5;
-    const col   = rndCol(0.7 + Math.random()*0.3);
-    const w     = 0.5 + Math.random()*1.8;
-    strands.push(new Strand(x, y, angle, spd, len, col, w));
+  const count = 28+Math.floor(Math.random()*20);
+  for (let i=0;i<count;i++) {
+    const angle=(i/count)*Math.PI*2+(Math.random()-0.5)*0.3;
+    const spd=8+Math.random()*16;
+    const len=80+Math.random()*Math.min(W,H)*0.5;
+    strands.push(new Strand(x,y,angle,spd,len,rndCol(0.7+Math.random()*0.3),0.5+Math.random()*1.8));
   }
-
-  const anchors = 6 + Math.floor(Math.random()*4);
-  for (let i=0; i<anchors; i++) {
-    const angle = (i/anchors)*Math.PI*2;
-    const len   = Math.min(W,H)*0.4 + Math.random()*Math.min(W,H)*0.3;
-    strands.push(new Strand(x, y, angle, 20, len, 'rgba(255,255,255,0.9)', 1.5 + Math.random()));
+  const anchors=6+Math.floor(Math.random()*4);
+  for (let i=0;i<anchors;i++) {
+    const angle=(i/anchors)*Math.PI*2;
+    const len=Math.min(W,H)*0.4+Math.random()*Math.min(W,H)*0.3;
+    strands.push(new Strand(x,y,angle,20,len,'rgba(255,255,255,0.9)',1.5+Math.random()));
   }
 }
 
-canvas.addEventListener('mousedown', e => {
-  onTouch(e.clientX, e.clientY);
-  const t = new Trail();
-  t.addPoint(e.clientX, e.clientY);
-  activeTrails['mouse'] = t;
-  trails.push(t);
+canvas.addEventListener('mousedown', e=>{
+  onTouch(e.clientX,e.clientY);
+  const t=new Trail();t.addPoint(e.clientX,e.clientY);activeTrails['mouse']=t;trails.push(t);
 });
-canvas.addEventListener('mousemove', e => {
-  if (e.buttons > 0 && activeTrails['mouse']) {
-    activeTrails['mouse'].addPoint(e.clientX, e.clientY);
-    for (const r of rings) r.blast(e.clientX, e.clientY, 0.8);
+canvas.addEventListener('mousemove', e=>{
+  if(e.buttons>0&&activeTrails['mouse']){
+    activeTrails['mouse'].addPoint(e.clientX,e.clientY);
+    for(const r of rings)r.blast(e.clientX,e.clientY,0.8);
   }
 });
-canvas.addEventListener('mouseup', e => {
-  if (activeTrails['mouse']) { activeTrails['mouse'].finish(); delete activeTrails['mouse']; }
-});
+canvas.addEventListener('mouseup', e=>{if(activeTrails['mouse']){activeTrails['mouse'].finish();delete activeTrails['mouse'];}});
 
-canvas.addEventListener('touchstart', e => {
+canvas.addEventListener('touchstart', e=>{
   e.preventDefault();
-  for (const t of e.changedTouches) {
-    onTouch(t.clientX, t.clientY);
-    const trail = new Trail();
-    trail.addPoint(t.clientX, t.clientY);
-    activeTrails[t.identifier] = trail;
-    trails.push(trail);
+  for(const t of e.changedTouches){
+    onTouch(t.clientX,t.clientY);
+    const trail=new Trail();trail.addPoint(t.clientX,t.clientY);
+    activeTrails[t.identifier]=trail;trails.push(trail);
   }
-}, { passive:false });
-canvas.addEventListener('touchmove', e => {
+},{passive:false});
+canvas.addEventListener('touchmove', e=>{
   e.preventDefault();
-  for (const t of e.changedTouches) {
-    if (activeTrails[t.identifier]) {
-      activeTrails[t.identifier].addPoint(t.clientX, t.clientY);
-      for (const r of rings) r.blast(t.clientX, t.clientY, 0.8);
+  for(const t of e.changedTouches){
+    if(activeTrails[t.identifier]){
+      activeTrails[t.identifier].addPoint(t.clientX,t.clientY);
+      for(const r of rings)r.blast(t.clientX,t.clientY,0.8);
     }
   }
-}, { passive:false });
-canvas.addEventListener('touchend', e => {
-  for (const t of e.changedTouches) {
-    if (activeTrails[t.identifier]) {
-      activeTrails[t.identifier].finish();
-      delete activeTrails[t.identifier];
-    }
+},{passive:false});
+canvas.addEventListener('touchend', e=>{
+  for(const t of e.changedTouches){
+    if(activeTrails[t.identifier]){activeTrails[t.identifier].finish();delete activeTrails[t.identifier];}
   }
-}, { passive:false });
+},{passive:false});
 
 // ── Stars ─────────────────────────────────────────────────
-const stars = [];
-for (let i=0; i<180; i++) stars.push({
-  x:Math.random()*W, y:Math.random()*H,
-  r:0.3+Math.random()*1.1,
-  a:0.08+Math.random()*0.4,
-  phase:Math.random()*Math.PI*2
-});
-function drawStars(ts) {
-  for (const s of stars) {
-    ctx.save();
-    ctx.globalAlpha = s.a*(0.5+0.5*Math.sin(ts*0.001+s.phase));
-    ctx.fillStyle='#fff';
-    ctx.beginPath();
-    ctx.arc(s.x,s.y,s.r,0,Math.PI*2);
-    ctx.fill();
-    ctx.restore();
+const stars=[];
+for(let i=0;i<180;i++)stars.push({x:Math.random()*W,y:Math.random()*H,r:0.3+Math.random()*1.1,a:0.08+Math.random()*0.4,phase:Math.random()*Math.PI*2});
+function drawStars(ts){
+  for(const s of stars){
+    ctx.save();ctx.globalAlpha=s.a*(0.5+0.5*Math.sin(ts*0.001+s.phase));
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();ctx.restore();
   }
 }
 
 // ── Trail ─────────────────────────────────────────────────
 class Trail {
-  constructor() {
-    this.points = [];
-    this.life = 1.0;
-    this.decay = 0.006 + Math.random()*0.003;
-    this.col = 'rgba(255,255,255,1)';
-    this.w = 7 + Math.random()*4;
-    this.active = true;
-  }
-  addPoint(x, y) {
-    this.points.push({ x, y });
-    if (this.points.length > 80) this.points.shift();
-  }
-  finish() { this.active = false; }
-  update() { if (!this.active) this.life -= this.decay; }
-  draw() {
-    if (this.points.length < 2 || this.life <= 0) return;
-    ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (let i=1; i<this.points.length; i++) {
-      const t = i / this.points.length;
-      const a = this.life * this.life * t * 0.85;
-      ctx.globalAlpha = a;
-      ctx.strokeStyle = this.col;
-      ctx.lineWidth = this.w * t;
-      ctx.beginPath();
-      ctx.moveTo(this.points[i-1].x, this.points[i-1].y);
-      ctx.lineTo(this.points[i].x, this.points[i].y);
-      ctx.stroke();
+  constructor(){this.points=[];this.life=1.0;this.decay=0.006+Math.random()*0.003;this.col='rgba(255,255,255,1)';this.w=7+Math.random()*4;this.active=true;}
+  addPoint(x,y){this.points.push({x,y});if(this.points.length>80)this.points.shift();}
+  finish(){this.active=false;}
+  update(){if(!this.active)this.life-=this.decay;}
+  draw(){
+    if(this.points.length<2||this.life<=0)return;
+    ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+    for(let i=1;i<this.points.length;i++){
+      const t=i/this.points.length;
+      ctx.globalAlpha=this.life*this.life*t*0.85;ctx.strokeStyle=this.col;ctx.lineWidth=this.w*t;
+      ctx.beginPath();ctx.moveTo(this.points[i-1].x,this.points[i-1].y);ctx.lineTo(this.points[i].x,this.points[i].y);ctx.stroke();
     }
     ctx.restore();
   }
-  isDead() { return !this.active && this.life <= 0; }
+  isDead(){return !this.active&&this.life<=0;}
 }
 
 // ── State ─────────────────────────────────────────────────
-let rings   = [];
-let strands = [];
-let waves   = [];
-let trails  = [];
-let activeTrails = {};
-let bgBrightness = 0;
+let rings=[],strands=[],waves=[],trails=[],activeTrails={},bgBrightness=0;
+for(let i=0;i<180;i++)rings.push(new Ring(true));
 
-for (let i=0; i<180; i++) rings.push(new Ring(true));
-
-// ── BG ────────────────────────────────────────────────────
-function drawBG() {
-  bgBrightness = Math.max(0, bgBrightness - 0.008);
-  const b = Math.floor(bgBrightness * 60);
-  const g = ctx.createRadialGradient(W*0.5,H*0.4,0,W*0.5,H*0.5,Math.max(W,H)*0.8);
-  g.addColorStop(0, `rgb(${4+b},${4+b},${4+b})`);
-  g.addColorStop(0.5, `rgb(${2+b/2},${2+b/2},${2+b/2})`);
-  g.addColorStop(1, `rgb(0,0,0)`);
-  ctx.fillStyle=g;
-  ctx.fillRect(0,0,W,H);
+function drawBG(){
+  bgBrightness=Math.max(0,bgBrightness-0.008);
+  const b=Math.floor(bgBrightness*60);
+  const g=ctx.createRadialGradient(W*0.5,H*0.4,0,W*0.5,H*0.5,Math.max(W,H)*0.8);
+  g.addColorStop(0,`rgb(${4+b},${4+b},${4+b})`);
+  g.addColorStop(0.5,`rgb(${2+b/2},${2+b/2},${2+b/2})`);
+  g.addColorStop(1,'rgb(0,0,0)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
 }
-function drawVignette() {
+function drawVignette(){
   const vg=ctx.createRadialGradient(W*0.5,H*0.5,H*0.1,W*0.5,H*0.5,H*0.9);
-  vg.addColorStop(0,'rgba(0,0,0,0)');
-  vg.addColorStop(1,'rgba(0,0,0,0.92)');
-  ctx.fillStyle=vg;
-  ctx.fillRect(0,0,W,H);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,0.92)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
 }
 
-// ── Render ────────────────────────────────────────────────
-function render(ts) {
+function render(ts){
   ctx.setTransform(DPR,0,0,DPR,0,0);
-  drawBG();
-  drawStars(ts);
-
-  for (let i=rings.length-1; i>=0; i--) {
-    rings[i].update(); rings[i].draw(ts);
-    if (rings[i].isDead()) rings[i] = new Ring(false);
-  }
-  for (let i=trails.length-1; i>=0; i--) {
-    trails[i].update(); trails[i].draw();
-    if (trails[i].isDead()) trails.splice(i,1);
-  }
-  for (let i=waves.length-1; i>=0; i--) {
-    waves[i].update(); waves[i].draw();
-    if (waves[i].isDead()) waves.splice(i,1);
-  }
-  for (let i=strands.length-1; i>=0; i--) {
-    strands[i].update(); strands[i].draw();
-    if (strands[i].isDead()) strands.splice(i,1);
-  }
-
+  drawBG();drawStars(ts);
+  for(let i=rings.length-1;i>=0;i--){rings[i].update();rings[i].draw(ts);if(rings[i].isDead())rings[i]=new Ring(false);}
+  for(let i=trails.length-1;i>=0;i--){trails[i].update();trails[i].draw();if(trails[i].isDead())trails.splice(i,1);}
+  for(let i=waves.length-1;i>=0;i--){waves[i].update();waves[i].draw();if(waves[i].isDead())waves.splice(i,1);}
+  for(let i=strands.length-1;i>=0;i--){strands[i].update();strands[i].draw();if(strands[i].isDead())strands.splice(i,1);}
   drawVignette();
   requestAnimationFrame(render);
 }
-
 requestAnimationFrame(render);
 </script>
 </body>
