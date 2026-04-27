@@ -7,6 +7,24 @@
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:#000; overflow:hidden; cursor:none; }
   canvas { display:block; }
+
+  #start {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    color: #fff;
+    font-family: sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.35em;
+    cursor: pointer;
+    z-index: 10;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   #back {
     position: fixed;
     top: 20px;
@@ -22,11 +40,13 @@
 </style>
 </head>
 <body>
+<div id="start">TAP TO START</div>
 <a id="back" href="https://yoshiharumatsumoto-newtral.github.io/">← back</a>
 <canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start');
 const DPR = window.devicePixelRatio || 1;
 let W = window.innerWidth, H = window.innerHeight;
 
@@ -39,13 +59,19 @@ function resize() {
 resize();
 window.addEventListener('resize', resize);
 
+let started = false;
+
 // ── Microphone ───────────────────────────────────────────
 let micLevel = 0;
 let micReady = false;
+let micInitialized = false;
+
 async function initMic() {
+  if (micInitialized) return;
+  micInitialized = true;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
-    const ac2 = new AudioContext();
+    const ac2 = new (window.AudioContext || window.webkitAudioContext)();
     const src = ac2.createMediaStreamSource(stream);
     const an  = ac2.createAnalyser(); an.fftSize = 256;
     src.connect(an);
@@ -61,9 +87,8 @@ async function initMic() {
       requestAnimationFrame(tick);
     }
     tick();
-  } catch(e) { console.warn('Mic not available',e); }
+  } catch(e) { console.warn('Mic not available',e); micInitialized = false; }
 }
-initMic();
 
 // ── Audio ────────────────────────────────────────────────
 let ac = null, masterGain = null;
@@ -74,35 +99,54 @@ function getAC() {
     masterGain.gain.value = 1.0;
     masterGain.connect(ac.destination);
   }
+  if (ac.state === 'suspended') ac.resume();
   return ac;
 }
 
+// ── TAP TO START ─────────────────────────────────────────
+function handleStart(e) {
+  e.preventDefault();
+  if (started) return;
+  started = true;
+
+  getAC();
+
+  // 無音バッファでSafariをアンロック
+  const a = ac;
+  const buf = a.createBuffer(1, 1, 22050);
+  const src = a.createBufferSource();
+  src.buffer = buf;
+  src.connect(a.destination);
+  src.start(0);
+
+  initMic();
+  startScreen.style.display = 'none';
+}
+
+startScreen.addEventListener('touchstart', handleStart, { passive: false });
+startScreen.addEventListener('click', handleStart);
+
 // ── 808 Kick ─────────────────────────────────────────────
-// Y軸: 上=高め(80hz→30hz)、下=超低め(55hz→20hz)
 function playKick(y) {
-  const a = getAC(); a.resume();
+  if (!started) return;
+  const a = getAC();
   const now = a.currentTime;
   const t = y / H;
 
-  // Y軸でピッチマッピング
-  const startFreq = 80  - t * 25;  // 80→55hz
-  const endFreq   = 30  - t * 10;  // 30→20hz
-  const decay     = 0.6 + t * 0.4; // 下ほど長く伸びる
+  const startFreq = 80  - t * 25;
+  const endFreq   = 30  - t * 10;
+  const decay     = 0.6 + t * 0.4;
 
-  // ── サブサイン（808の核心）
   const osc = a.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(startFreq, now);
-  // 急激なピッチ降下 — ここがクラブっぽさの鍵
   osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.035);
 
-  // ── サブのアンプエンベロープ — 長くずっしり
   const oscEnv = a.createGain();
   oscEnv.gain.setValueAtTime(0.001, now);
-  oscEnv.gain.exponentialRampToValueAtTime(1.0, now + 0.002); // 瞬間アタック
+  oscEnv.gain.exponentialRampToValueAtTime(1.0, now + 0.002);
   oscEnv.gain.exponentialRampToValueAtTime(0.001, now + decay);
 
-  // ── トランジェント（最初の1〜2msの硬い打撃感）
   const clickOsc = a.createOscillator();
   clickOsc.type = 'sine';
   clickOsc.frequency.value = 160;
@@ -111,23 +155,19 @@ function playKick(y) {
   clickEnv.gain.exponentialRampToValueAtTime(0.6, now + 0.001);
   clickEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
 
-  // ── サチュレーション（808の歪み感）
   const sat = a.createWaveShaper();
   const curve = new Float32Array(512);
   for (let i=0;i<512;i++) {
     const x = (i*2)/512 - 1;
-    // ソフトクリップ — 低域を潰してパンチを出す
     curve[i] = (Math.PI + 220) * x / (Math.PI + 220 * Math.abs(x));
   }
   sat.curve = curve;
 
-  // ── ローパス（余分な高域をカット）
   const lp = a.createBiquadFilter();
   lp.type = 'lowpass';
   lp.frequency.value = 120;
   lp.Q.value = 0.5;
 
-  // ── 最終ゲイン
   const out = a.createGain();
   out.gain.value = 1.2;
 
@@ -140,20 +180,18 @@ function playKick(y) {
   clickOsc.start(now); clickOsc.stop(now + 0.025);
 }
 
-// ── 808 Snare / Clap ──────────────────────────────────────
-// Y軸: 上=タイトなリムショット、下=808スラップスネア
+// ── 808 Snare ────────────────────────────────────────────
 function playSnare(y) {
-  const a = getAC(); a.resume();
+  if (!started) return;
+  const a = getAC();
   const now = a.currentTime;
   const t = y / H;
 
-  // Y軸でキャラクター変化
-  const noiseDecay  = 0.08 + t * 0.06;  // 上=タイト、下=少し長め
-  const noiseFreq   = 3200 - t * 1800;  // 上=明るい、下=暗い
-  const toneFreq    = 320  - t * 160;   // 上=高い、下=低い
+  const noiseDecay  = 0.08 + t * 0.06;
+  const noiseFreq   = 3200 - t * 1800;
+  const toneFreq    = 320  - t * 160;
   const toneDecay   = 0.06 + t * 0.04;
 
-  // ── ノイズ層（スネアの質感）
   const bufLen = Math.floor(a.sampleRate * 0.3);
   const noiseBuf = a.createBuffer(1, bufLen, a.sampleRate);
   const data = noiseBuf.getChannelData(0);
@@ -161,7 +199,6 @@ function playSnare(y) {
   const noise = a.createBufferSource();
   noise.buffer = noiseBuf;
 
-  // ハイパスでロー成分をカット → タイトな質感
   const hp = a.createBiquadFilter();
   hp.type = 'highpass';
   hp.frequency.value = 800;
@@ -177,7 +214,6 @@ function playSnare(y) {
   noiseEnv.gain.exponentialRampToValueAtTime(0.9, now + 0.001);
   noiseEnv.gain.exponentialRampToValueAtTime(0.001, now + noiseDecay);
 
-  // ── トーン層（ボディ）
   const tone = a.createOscillator();
   tone.type = 'triangle';
   tone.frequency.setValueAtTime(toneFreq, now);
@@ -188,7 +224,6 @@ function playSnare(y) {
   toneEnv.gain.exponentialRampToValueAtTime(0.7, now + 0.001);
   toneEnv.gain.exponentialRampToValueAtTime(0.001, now + toneDecay);
 
-  // ── サチュレーション（パンチを出す）
   const sat = a.createWaveShaper();
   const curve = new Float32Array(512);
   for (let i=0;i<512;i++) {
@@ -351,6 +386,7 @@ class Shockwave {
 
 // ── Touch ─────────────────────────────────────────────────
 function onTouch(x, y) {
+  if (!started) return;
   if (x < W * 0.5) {
     playKick(y);
   } else {
@@ -389,6 +425,7 @@ canvas.addEventListener('mousemove', e=>{
 canvas.addEventListener('mouseup', e=>{if(activeTrails['mouse']){activeTrails['mouse'].finish();delete activeTrails['mouse'];}});
 
 canvas.addEventListener('touchstart', e=>{
+  if(e.target.id==='back'||e.target.id==='start') return;
   e.preventDefault();
   for(const t of e.changedTouches){
     onTouch(t.clientX,t.clientY);
