@@ -108,17 +108,13 @@ function handleStart(e) {
   e.preventDefault();
   if (started) return;
   started = true;
-
   getAC();
-
-  // 無音バッファでSafariをアンロック
   const a = ac;
   const buf = a.createBuffer(1, 1, 22050);
   const src = a.createBufferSource();
   src.buffer = buf;
   src.connect(a.destination);
   src.start(0);
-
   initMic();
   startScreen.style.display = 'none';
 }
@@ -133,10 +129,30 @@ function playKick(y) {
   const now = a.currentTime;
   const t = y / H;
 
-  const startFreq = 80  - t * 25;
-  const endFreq   = 30  - t * 10;
+  const startFreq = 80 - t * 25;
+  const endFreq   = 30 - t * 10;
   const decay     = 0.6 + t * 0.4;
 
+  const out = a.createGain();
+  out.gain.value = 1.2;
+  out.connect(masterGain);
+
+  const sat = a.createWaveShaper();
+  const curve = new Float32Array(512);
+  for (let i=0;i<512;i++) {
+    const x = (i*2)/512 - 1;
+    curve[i] = (Math.PI + 220) * x / (Math.PI + 220 * Math.abs(x));
+  }
+  sat.curve = curve;
+  sat.connect(out);
+
+  const lp = a.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 120;
+  lp.Q.value = 0.5;
+  lp.connect(sat);
+
+  // サブサイン
   const osc = a.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(startFreq, now);
@@ -146,7 +162,10 @@ function playKick(y) {
   oscEnv.gain.setValueAtTime(0.001, now);
   oscEnv.gain.exponentialRampToValueAtTime(1.0, now + 0.002);
   oscEnv.gain.exponentialRampToValueAtTime(0.001, now + decay);
+  osc.connect(oscEnv);
+  oscEnv.connect(lp);
 
+  // クリック
   const clickOsc = a.createOscillator();
   clickOsc.type = 'sine';
   clickOsc.frequency.value = 160;
@@ -154,30 +173,17 @@ function playKick(y) {
   clickEnv.gain.setValueAtTime(0.001, now);
   clickEnv.gain.exponentialRampToValueAtTime(0.6, now + 0.001);
   clickEnv.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
-
-  const sat = a.createWaveShaper();
-  const curve = new Float32Array(512);
-  for (let i=0;i<512;i++) {
-    const x = (i*2)/512 - 1;
-    curve[i] = (Math.PI + 220) * x / (Math.PI + 220 * Math.abs(x));
-  }
-  sat.curve = curve;
-
-  const lp = a.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.value = 120;
-  lp.Q.value = 0.5;
-
-  const out = a.createGain();
-  out.gain.value = 1.2;
-
-  osc.connect(oscEnv);
   clickOsc.connect(clickEnv);
-  oscEnv.connect(sat); clickEnv.connect(sat);
-  sat.connect(lp); lp.connect(out); out.connect(masterGain);
+  clickEnv.connect(lp);
 
-  osc.start(now); osc.stop(now + decay + 0.1);
-  clickOsc.start(now); clickOsc.stop(now + 0.025);
+  const stopAt = now + decay + 0.15;
+  osc.start(now); osc.stop(stopAt);
+  clickOsc.start(now); clickOsc.stop(now + 0.03);
+
+  // 再生終了後にノードを切断してクリーンアップ
+  osc.onended = () => {
+    try { oscEnv.disconnect(); lp.disconnect(); sat.disconnect(); out.disconnect(); } catch(e) {}
+  };
 }
 
 // ── 808 Snare ────────────────────────────────────────────
@@ -187,11 +193,26 @@ function playSnare(y) {
   const now = a.currentTime;
   const t = y / H;
 
-  const noiseDecay  = 0.08 + t * 0.06;
-  const noiseFreq   = 3200 - t * 1800;
-  const toneFreq    = 320  - t * 160;
-  const toneDecay   = 0.06 + t * 0.04;
+  const noiseDecay = 0.08 + t * 0.06;
+  const noiseFreq  = 3200 - t * 1800;
+  const toneFreq   = 320  - t * 160;
+  const toneDecay  = 0.06 + t * 0.04;
+  const totalDecay = Math.max(noiseDecay, toneDecay);
 
+  const out = a.createGain();
+  out.gain.value = 1.1;
+  out.connect(masterGain);
+
+  const sat = a.createWaveShaper();
+  const curve = new Float32Array(512);
+  for (let i=0;i<512;i++) {
+    const x = (i*2)/512-1;
+    curve[i] = x*(1+1.5)/(1+1.5*Math.abs(x));
+  }
+  sat.curve = curve;
+  sat.connect(out);
+
+  // ノイズ層
   const bufLen = Math.floor(a.sampleRate * 0.3);
   const noiseBuf = a.createBuffer(1, bufLen, a.sampleRate);
   const data = noiseBuf.getChannelData(0);
@@ -200,20 +221,17 @@ function playSnare(y) {
   noise.buffer = noiseBuf;
 
   const hp = a.createBiquadFilter();
-  hp.type = 'highpass';
-  hp.frequency.value = 800;
-  hp.Q.value = 0.5;
-
+  hp.type = 'highpass'; hp.frequency.value = 800; hp.Q.value = 0.5;
   const bp = a.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = noiseFreq;
-  bp.Q.value = 1.2;
+  bp.type = 'bandpass'; bp.frequency.value = noiseFreq; bp.Q.value = 1.2;
 
   const noiseEnv = a.createGain();
   noiseEnv.gain.setValueAtTime(0.001, now);
   noiseEnv.gain.exponentialRampToValueAtTime(0.9, now + 0.001);
   noiseEnv.gain.exponentialRampToValueAtTime(0.001, now + noiseDecay);
+  noise.connect(hp); hp.connect(bp); bp.connect(noiseEnv); noiseEnv.connect(sat);
 
+  // トーン層
   const tone = a.createOscillator();
   tone.type = 'triangle';
   tone.frequency.setValueAtTime(toneFreq, now);
@@ -223,25 +241,20 @@ function playSnare(y) {
   toneEnv.gain.setValueAtTime(0.001, now);
   toneEnv.gain.exponentialRampToValueAtTime(0.7, now + 0.001);
   toneEnv.gain.exponentialRampToValueAtTime(0.001, now + toneDecay);
+  tone.connect(toneEnv); toneEnv.connect(sat);
 
-  const sat = a.createWaveShaper();
-  const curve = new Float32Array(512);
-  for (let i=0;i<512;i++) {
-    const x = (i*2)/512-1;
-    curve[i] = x*(1+1.5)/(1+1.5*Math.abs(x));
-  }
-  sat.curve = curve;
+  const stopAt = now + totalDecay + 0.1;
+  noise.start(now); noise.stop(stopAt);
+  tone.start(now); tone.stop(stopAt);
 
-  const out = a.createGain();
-  out.gain.value = 1.1;
-
-  noise.connect(hp); hp.connect(bp); bp.connect(noiseEnv);
-  tone.connect(toneEnv);
-  noiseEnv.connect(sat); toneEnv.connect(sat);
-  sat.connect(out); out.connect(masterGain);
-
-  noise.start(now); noise.stop(now + noiseDecay + 0.05);
-  tone.start(now); tone.stop(now + toneDecay + 0.05);
+  // 再生終了後にノードを切断してクリーンアップ
+  tone.onended = () => {
+    try {
+      noiseEnv.disconnect(); toneEnv.disconnect();
+      hp.disconnect(); bp.disconnect();
+      sat.disconnect(); out.disconnect();
+    } catch(e) {}
+  };
 }
 
 // ── Palette ───────────────────────────────────────────────
@@ -387,16 +400,10 @@ class Shockwave {
 // ── Touch ─────────────────────────────────────────────────
 function onTouch(x, y) {
   if (!started) return;
-  if (x < W * 0.5) {
-    playKick(y);
-  } else {
-    playSnare(y);
-  }
-
+  if (x < W * 0.5) { playKick(y); } else { playSnare(y); }
   bgBrightness = Math.min(1, bgBrightness+0.18);
   for (const r of rings) r.blast(x,y);
   waves.push(new Shockwave(x,y));
-
   const count = 28+Math.floor(Math.random()*20);
   for (let i=0;i<count;i++) {
     const angle=(i/count)*Math.PI*2+(Math.random()-0.5)*0.3;
